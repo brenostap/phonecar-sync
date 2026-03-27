@@ -1,0 +1,49 @@
+# ══════════════════════════════════════════════════════════════
+# PHONE CART — Sync automático via GitHub Actions
+# Roda a cada hora, 24h por dia, de graça
+#
+# SETUP:
+# 1. Crie um repositório privado no GitHub (github.com/new)
+# 2. Coloque este arquivo em: .github/workflows/sync.yml
+# 3. Coloque sync.js e package.json na raiz do repositório
+# 4. Vá em Settings → Secrets → Actions e adicione:
+#    - FONENINJA_TOKEN
+#    - SUPABASE_URL
+#    - SUPABASE_KEY
+# ══════════════════════════════════════════════════════════════
+
+name: Sync FoneNinja → Supabase
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # A cada hora (minuto 0 de cada hora)
+  workflow_dispatch:        # Permite rodar manualmente pelo GitHub
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run sync
+        env:
+          FONENINJA_TOKEN: ${{ secrets.FONENINJA_TOKEN }}
+          SUPABASE_URL:    ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY:    ${{ secrets.SUPABASE_KEY }}
+        run: node sync.js
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "::error::Sync falhou! Verifique os logs acima."
