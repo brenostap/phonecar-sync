@@ -1,0 +1,17 @@
+{
+  "name": "phonecart-sync",
+  "version": "1.0.0",
+  "description": "Sync FoneNinja → Supabase para Phone Cart",
+  "main": "sync.js",
+  "scripts": {
+    "sync": "node sync.js",
+    "start": "node sync.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "node-fetch": "^3.3.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
