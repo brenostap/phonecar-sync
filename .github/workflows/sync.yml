@@ -18,11 +18,13 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+        env:
+              FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     timeout-minutes: 60
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
