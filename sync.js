@@ -1,6 +1,5 @@
 // ══════════════════════════════════════════════════════════════
-// PHONE CART — Sync v2 (Incremental)
-// Sincroniza só o que mudou desde o último sync
+// PHONE CART — Sync v3
 // ══════════════════════════════════════════════════════════════
 
 const { createClient } = require('@supabase/supabase-js');
@@ -20,6 +19,15 @@ async function fnGet(path) {
   const res = await fetch(`${BASE}${path}`, { headers: fnHeaders() });
   if (!res.ok) throw new Error(`FoneNinja ${path}: ${res.status}`);
   return res.json();
+}
+
+// Acessório = sem IMEI, sem apple_id, e custo < R$200
+// (igual ao isAcess do dashboard)
+function isAcessorio(p) {
+  return !p.imei_1 && !p.apple_id && parseFloat(p.valor_estoque || 0) < 200;
+}
+function isPrincipal(p) {
+  return !isAcessorio(p);
 }
 
 function parseObs(obs) {
@@ -65,10 +73,6 @@ function parseObs(obs) {
   return { loja, vendedor, atendente };
 }
 
-function isPrincipal(p) {
-  return !!(p.apple_id) || parseFloat(p.valor_estoque || 0) >= 200;
-}
-
 async function getLastSync(tabela) {
   const { data } = await supabase.from('sync_log').select('last_sync').eq('tabela', tabela).single();
   return data?.last_sync || null;
@@ -82,7 +86,9 @@ async function logSync(tabela, total, status, erro = null) {
   console.log(`  [${tabela}] ${status} — ${total} registros`);
 }
 
-// ── SYNC FUNCIONÁRIOS (rápido, sempre) ───────────────────────
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ── SYNC FUNCIONÁRIOS ─────────────────────────────────────────
 async function syncFuncionarios() {
   const data = await fnGet('/refactored-funcionarios');
   const funcs = data.payload || data.data || [];
@@ -97,7 +103,7 @@ async function syncFuncionarios() {
   await logSync('funcionarios', rows.length, 'ok');
 }
 
-// ── SYNC ESTOQUE (rápido, sempre) ────────────────────────────
+// ── SYNC ESTOQUE (sempre completo — é rápido) ─────────────────
 async function syncEstoque() {
   const dp = encodeURIComponent(JSON.stringify({
     first: 0, rows: 1000, sortField: 'id', sortOrder: -1,
@@ -105,16 +111,17 @@ async function syncEstoque() {
   }));
   const data = await fnGet(`/apples?dt_params=${dp}`);
   const apples = data.payload?.data || data.data || [];
-  if (!apples.length) return;
+  if (!apples.length) { console.log('  [estoque] Nenhum item disponível'); return; }
   const rows = apples.map(i => ({
     id: i.id, loja_id: i.loja_id, produto_id: i.produto_id,
-    titulo: i.produto?.titulo, serial: i.serial,
+    titulo: i.produto?.titulo || i.titulo,
+    serial: i.serial,
     imei_1: i.imei_1, imei_2: i.imei_2,
     bateria: parseInt(i.bateria || 0),
     valor_estoque: parseFloat(i.valor_estoque || 0),
     preco_varejo: parseFloat(i.preco_varejo || 0),
     status: i.status,
-    ultimo_fornecedor: i.ultimo_fornecedor?.nome,
+    ultimo_fornecedor: i.ultimo_fornecedor?.nome || i.ultimo_fornecedor,
     ultimo_fornecedor_id: i.ultimo_fornecedor_id,
     observacoes: i.observacoes,
     created_at: i.created_at, updated_at: i.updated_at,
@@ -124,23 +131,13 @@ async function syncEstoque() {
   await logSync('estoque', rows.length, 'ok');
 }
 
-// ── SYNC CLIENTES (incremental) ───────────────────────────────
+// ── SYNC CLIENTES (sempre completo — paginado) ────────────────
 async function syncClientes() {
-  const lastSync = await getLastSync('clientes');
   let page = 1, total = 0;
-
   while (true) {
-    // Pegar mais recentes primeiro — parar quando chegar antes do último sync
-    const data = await fnGet(`/clientes?perPage=200&sort=created_at:desc&page=${page}`);
+    const data = await fnGet(`/clientes?perPage=200&sort=id:asc&page=${page}`);
     const clientes = data.data || [];
     if (!clientes.length) break;
-
-    // Se todos são mais antigos que o último sync, parar
-    if (lastSync) {
-      const novos = clientes.filter(c => new Date(c.created_at) > new Date(lastSync));
-      if (novos.length === 0) { console.log(`  [clientes] Sem novos desde ${lastSync}`); break; }
-    }
-
     const rows = clientes.map(c => ({
       id: c.id, nome: c.nome, telefone: c.telefone, email: c.email,
       instagram: c.instagram, cidade: c.cidade, estado: c.estado, cep: c.cep,
@@ -151,12 +148,11 @@ async function syncClientes() {
     }));
     await supabase.from('clientes').upsert(rows);
     total += rows.length;
-
+    console.log(`  [clientes] página ${page}: ${rows.length} (total: ${total})`);
     if (clientes.length < 200) break;
     page++;
-    await new Promise(r => setTimeout(r, 200));
+    await sleep(200);
   }
-
   await logSync('clientes', total, 'ok');
 }
 
@@ -164,17 +160,14 @@ async function syncClientes() {
 async function syncCompras() {
   const lastSync = await getLastSync('compras');
   let page = 1, total = 0;
-
   while (true) {
     const data = await fnGet(`/compras?sort=data_entrada:desc&page=${page}&perPage=100`);
     const compras = data.payload?.data || data.data || [];
     if (!compras.length) break;
-
     if (lastSync) {
       const novos = compras.filter(c => new Date(c.data_entrada) > new Date(lastSync));
       if (novos.length === 0) break;
     }
-
     for (const compra of compras) {
       await supabase.from('compras').upsert({
         id: compra.id, fornecedor_id: compra.entidade_id,
@@ -186,26 +179,43 @@ async function syncCompras() {
       });
       total++;
     }
-
     if (compras.length < 100) break;
     page++;
-    await new Promise(r => setTimeout(r, 200));
+    await sleep(200);
   }
-
   await logSync('compras', total, 'ok');
 }
 
-// ── SYNC VENDAS (incremental — só recentes) ───────────────────
+// ── SALVAR PRODUTOS DE UMA VENDA ──────────────────────────────
+async function salvarProdutosVenda(vendaId, produtos) {
+  if (!produtos || !produtos.length) return;
+  const prods = produtos.map(p => ({
+    id: p.id,
+    venda_id: vendaId,
+    apple_id: p.apple_id || null,
+    produto_id: p.produto_id || null,
+    titulo: p.titulo || p.produto?.titulo || null,
+    serial: p.serial || p.apple?.serial || null,
+    imei_1: p.imei_1 || p.apple?.imei_1 || null,
+    preco: parseFloat(p.preco || 0),
+    valor_estoque: parseFloat(p.valor_estoque || 0),
+    lucro: parseFloat(p.preco || 0) - parseFloat(p.valor_estoque || 0),
+    desconto: parseFloat(p.desconto || 0),
+    quantidade: parseInt(p.quantidade || 1),
+    is_principal: isPrincipal(p),
+    synced_at: new Date().toISOString()
+  }));
+  await supabase.from('venda_produtos').upsert(prods);
+}
+
+// ── SYNC VENDAS (incremental — vendas novas + produtos completos) ─
 async function syncVendas() {
   const lastSync = await getLastSync('vendas');
-  
-  // Na primeira vez: buscar só os últimos 3 meses para não demorar
-  // Depois: buscar só desde o último sync
-  const diasAtras = lastSync ? 0 : 90;
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - diasAtras);
-  
   let page = 1, total = 0, parar = false;
+
+  // Sem lastSync = primeira vez: buscar últimos 6 meses
+  const cutoff = new Date();
+  if (!lastSync) cutoff.setMonth(cutoff.getMonth() - 6);
 
   while (!parar) {
     const data = await fnGet(`/vendas?sort=data_saida:desc&page=${page}&perPage=50&filters[status]=completed`);
@@ -213,76 +223,123 @@ async function syncVendas() {
     if (!vendas.length) break;
 
     for (const venda of vendas) {
-      // Parar se chegou em data antiga
       const dataVenda = new Date(venda.data_saida);
       if (lastSync && dataVenda <= new Date(lastSync)) { parar = true; break; }
       if (!lastSync && dataVenda < cutoff) { parar = true; break; }
 
-      // Buscar detalhes
+      // Buscar detalhes (inclui todos os produtos — iPhones + acessórios)
       let produtos = [];
       try {
         const detail = await fnGet(`/vendas/${venda.id}`);
         produtos = (detail.data || detail).produtos || [];
-      } catch (e) {}
+      } catch (e) {
+        console.warn(`  Erro ao buscar detalhe venda ${venda.id}:`, e.message);
+      }
 
       const { loja, vendedor, atendente } = parseObs(venda.observacoes);
       const cli = venda.cliente || {};
 
       await supabase.from('vendas').upsert({
         id: venda.id, loja_id: venda.loja_id, loja,
-        cliente_id: venda.cliente_id, cliente_nome: cli.nome,
-        cliente_tel: cli.telefone, cliente_insta: cli.instagram,
-        cliente_cidade: cli.cidade, data_saida: venda.data_saida,
+        cliente_id: venda.cliente_id,
+        cliente_nome: cli.nome || null,
+        cliente_tel: cli.telefone || null,
+        cliente_insta: cli.instagram || null,
+        cliente_cidade: cli.cidade || null,
+        data_saida: venda.data_saida,
         status: venda.status,
         valor_total: parseFloat(venda.valor_total || 0),
         custo_total: parseFloat(venda.custo_total || 0),
         lucro: parseFloat(venda.lucro || 0),
         desconto: parseFloat(venda.desconto || 0),
-        observacoes: venda.observacoes, vendedor_obs: vendedor,
-        atendente_obs: atendente, vendedor_id: venda.vendedor_id,
+        observacoes: venda.observacoes,
+        vendedor_obs: vendedor,
+        atendente_obs: atendente,
+        vendedor_id: venda.vendedor_id,
         qtd_produtos: parseInt(venda.qtd_produtos || 0),
         synced_at: new Date().toISOString()
       });
 
-      if (produtos.length) {
-        const prods = produtos.map(p => ({
-          id: p.id, venda_id: venda.id, apple_id: p.apple_id,
-          produto_id: p.produto_id,
-          titulo: p.titulo || p.produto?.titulo,
-          serial: p.serial || p.apple?.serial,
-          imei_1: p.imei_1 || p.apple?.imei_1,
-          preco: parseFloat(p.preco || 0),
-          valor_estoque: parseFloat(p.valor_estoque || 0),
-          lucro: parseFloat(p.preco || 0) - parseFloat(p.valor_estoque || 0),
-          desconto: parseFloat(p.desconto || 0),
-          quantidade: parseInt(p.quantidade || 1),
-          is_principal: isPrincipal(p),
-          synced_at: new Date().toISOString()
-        }));
-        await supabase.from('venda_produtos').upsert(prods);
-      }
-
+      await salvarProdutosVenda(venda.id, produtos);
       total++;
     }
 
-    console.log(`  Página ${page}: ${vendas.length} vendas (total: ${total})`);
+    console.log(`  Página ${page}: ${vendas.length} vendas (sincronizadas: ${total})`);
     if (vendas.length < 50) break;
     page++;
-    await new Promise(r => setTimeout(r, 300));
+    await sleep(300);
   }
 
   await logSync('vendas', total, 'ok');
 }
 
+// ── RESYNC PRODUTOS (corrige vendas sem acessórios no banco) ──
+// Roda uma única vez quando RESYNC_PRODUTOS=true
+async function resyncProdutos() {
+  console.log('  Buscando vendas sem acessórios no banco...');
+
+  // Pegar todas as vendas que têm qtd_produtos > 1 mas só 1 produto no banco
+  // Estratégia: buscar vendas dos últimos 6 meses e re-salvar todos os produtos
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - 6);
+
+  // Buscar IDs de vendas no banco dos últimos 6 meses
+  const { data: vendasBanco } = await supabase
+    .from('vendas')
+    .select('id, qtd_produtos')
+    .gte('data_saida', cutoff.toISOString())
+    .order('data_saida', { ascending: false });
+
+  if (!vendasBanco?.length) { console.log('  Nenhuma venda encontrada'); return; }
+
+  // Buscar contagem de produtos por venda no banco
+  const { data: contagens } = await supabase
+    .from('venda_produtos')
+    .select('venda_id')
+    .in('venda_id', vendasBanco.map(v => v.id));
+
+  const contagemMap = {};
+  (contagens || []).forEach(r => {
+    contagemMap[r.venda_id] = (contagemMap[r.venda_id] || 0) + 1;
+  });
+
+  // Focar em vendas onde qtd_produtos > produtos no banco (acessórios faltando)
+  const vendasFaltando = vendasBanco.filter(v =>
+    parseInt(v.qtd_produtos || 0) > (contagemMap[v.id] || 0)
+  );
+
+  console.log(`  ${vendasFaltando.length} vendas com produtos incompletos de ${vendasBanco.length} total`);
+
+  let total = 0;
+  for (const venda of vendasFaltando) {
+    try {
+      const detail = await fnGet(`/vendas/${venda.id}`);
+      const produtos = (detail.data || detail).produtos || [];
+      if (produtos.length > 0) {
+        await salvarProdutosVenda(venda.id, produtos);
+        total++;
+      }
+    } catch (e) {
+      console.warn(`  Erro venda ${venda.id}:`, e.message);
+    }
+    await sleep(200);
+  }
+
+  console.log(`  [resync_produtos] ${total} vendas com produtos atualizados`);
+  await logSync('resync_produtos', total, 'ok');
+}
+
 // ── MAIN ──────────────────────────────────────────────────────
 async function main() {
-  console.log('🚀 Phone Cart Sync v2 —', new Date().toLocaleString('pt-BR'));
+  console.log('🚀 Phone Cart Sync v3 —', new Date().toLocaleString('pt-BR'));
   console.log('━'.repeat(50));
 
   if (!FONENINJA_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
     console.error('❌ Variáveis de ambiente faltando!');
     process.exit(1);
   }
+
+  const RESYNC = process.env.RESYNC_PRODUTOS === 'true';
 
   try {
     console.log('\n👔 Funcionários...');
@@ -299,6 +356,11 @@ async function main() {
 
     console.log('\n📦 Vendas...');
     await syncVendas();
+
+    if (RESYNC) {
+      console.log('\n🔄 Resync produtos (acessórios)...');
+      await resyncProdutos();
+    }
 
     console.log('\n✅ Sync completo!');
   } catch (err) {
