@@ -7,8 +7,8 @@ name: Sync FoneNinja → Supabase
 
 on:
   schedule:
-    - cron: '0 * * * *'   # A cada hora
-  workflow_dispatch:        # Permite rodar manualmente
+    - cron: '0 * * * *'
+  workflow_dispatch:
     inputs:
       resync_produtos:
         description: 'Ressincronizar produtos/acessórios de vendas antigas? (true/false)'
@@ -19,12 +19,12 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     env:
-              FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     timeout-minutes: 60
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v
+        uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
