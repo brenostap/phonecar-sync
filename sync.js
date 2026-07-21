@@ -92,11 +92,14 @@ async function syncFuncionarios() {
 }
 
 // ── SYNC ESTOQUE ──────────────────────────────────────────────
+const ESTOQUE_LIMITE = 1000;
+
 async function syncEstoque() {
-  const dp = encodeURIComponent(JSON.stringify({ first: 0, rows: 1000, sortField: 'id', sortOrder: -1, filters: { status: { value: 'available', matchMode: 'equals' } } }));
+  const dp = encodeURIComponent(JSON.stringify({ first: 0, rows: ESTOQUE_LIMITE, sortField: 'id', sortOrder: -1, filters: { status: { value: 'available', matchMode: 'equals' } } }));
   const data = await fnGet(`/apples?dt_params=${dp}`);
   const apples = data.payload?.data || data.data || [];
   if (!apples.length) { console.log(' [estoque] Nenhum item disponível'); return; }
+  const agora = new Date().toISOString();
   const rows = apples.map(i => ({
     id: i.id, loja_id: i.loja_id, produto_id: i.produto_id,
     titulo: i.produto?.titulo || i.titulo, serial: i.serial,
@@ -104,9 +107,28 @@ async function syncEstoque() {
     valor_estoque: parseFloat(i.valor_estoque || 0), preco_varejo: parseFloat(i.preco_varejo || 0),
     status: i.status, ultimo_fornecedor: i.ultimo_fornecedor?.nome || i.ultimo_fornecedor,
     ultimo_fornecedor_id: i.ultimo_fornecedor_id, observacoes: i.observacoes,
-    created_at: i.created_at, updated_at: i.updated_at, synced_at: new Date().toISOString()
+    created_at: i.created_at, updated_at: i.updated_at, synced_at: agora
   }));
-  await supabase.from('estoque').upsert(rows);
+  const { error: erroUpsert } = await supabase.from('estoque').upsert(rows);
+  if (erroUpsert) throw erroUpsert;
+
+  // BAIXA — a FoneNinja devolve apenas o que esta disponivel agora. Sem este
+  // passo o aparelho vendido continua 'available' para sempre e a tabela so
+  // cresce: chegou a 1.329 registros para 72 aparelhos reais em jul/2026.
+  // Como todo item do snapshot acabou de receber synced_at = agora, quem
+  // continua 'available' com synced_at anterior nao veio mais da FoneNinja.
+  if (apples.length >= ESTOQUE_LIMITE) {
+    // resposta possivelmente truncada: dar baixa aqui marcaria item real como vendido
+    console.log(' [estoque] resposta no limite da API — baixa NAO aplicada por seguranca');
+  } else {
+    const { error: erroBaixa, count } = await supabase.from('estoque')
+      .update({ status: 'sold' }, { count: 'exact' })
+      .eq('status', 'available')
+      .lt('synced_at', agora);
+    if (erroBaixa) throw erroBaixa;
+    if (count) console.log(` [estoque] ${count} item(ns) sairam do estoque — marcados como sold`);
+  }
+
   await logSync('estoque', rows.length, 'ok');
 }
 
