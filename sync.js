@@ -200,17 +200,57 @@ async function salvarProdutosVenda(vendaId, produtos) {
   await supabase.from('venda_produtos').upsert(prods);
 }
 
+// ── SALVAR PAGAMENTOS DE UMA VENDA ────────────────────────────
+// A API repete o mesmo pagamento em alguns payloads -> dedupe por id.
+async function salvarPagamentosVenda(vendaId, pagamentos) {
+  if (!pagamentos || !pagamentos.length) return;
+  const vistos = new Set();
+  const rows = [];
+  for (const pg of pagamentos) {
+    if (!pg || pg.id == null || vistos.has(pg.id)) continue;
+    vistos.add(pg.id);
+    rows.push({
+      id: pg.id, venda_id: vendaId,
+      forma_pagamento_id: pg.forma_pagamento_id ?? null,
+      forma_pagamento: pg.forma_pagamento?.nome ?? null,
+      conta_bancaria_id: pg.conta_bancaria_id ?? null,
+      conta_bancaria: pg.conta_bancaria?.nome ?? null,
+      valor: numOrNull(pg.valor), taxa: numOrNull(pg.taxa),
+      taxa_extra: numOrNull(pg.taxa_extra), liquido: numOrNull(pg.liquido),
+      numero_parcelas: pg.numero_parcelas == null ? null : parseInt(pg.numero_parcelas),
+      status: pg.status ?? null,
+      data_pagamento: pg.data_pagamento ?? null,
+      data_compensacao: pg.data_compensacao ?? null,
+      confirmed_at: pg.confirmed_at ?? null,
+      canceled_at: pg.canceled_at ?? null,
+      synced_at: new Date().toISOString()
+    });
+  }
+  if (rows.length) await supabase.from('pagamentos').upsert(rows);
+}
+
+function numOrNull(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 // ── HELPER: upsert uma venda com seus produtos ────────────────
 async function upsertVenda(venda) {
-  let produtos = [];
+  let produtos = [], pagamentos = [], upgrade = null;
   try {
-    const detail = await fnGet(`/vendas/${venda.id}`);
-    produtos = (detail.data || detail).produtos || [];
+    const detail = (await fnGet(`/vendas/${venda.id}`));
+    const d = detail.data || detail;
+    produtos   = d.produtos   || [];
+    pagamentos = d.pagamentos || [];
+    upgrade    = d.upgrade    || null;
   } catch (e) { console.warn(` Erro detalhe venda ${venda.id}:`, e.message); }
 
   const { loja, vendedor, atendente } = parseObs(venda.observacoes);
   const cli = venda.cliente || {};
   await supabase.from('vendas').upsert({
+    upgrade_valor: upgrade ? numOrNull(upgrade.valor_total) : null,
+    upgrade_qtd: upgrade && Array.isArray(upgrade.produtos) ? upgrade.produtos.length : null,
     id: venda.id, loja_id: venda.loja_id, loja,
     cliente_id: venda.cliente_id,
     cliente_nome: cli.nome || null, cliente_tel: cli.telefone || null,
@@ -227,6 +267,7 @@ async function upsertVenda(venda) {
     synced_at: new Date().toISOString()
   });
   await salvarProdutosVenda(venda.id, produtos);
+  await salvarPagamentosVenda(venda.id, pagamentos);
 }
 
 // ── SYNC VENDAS (novas + re-sync 7 dias para capturar edições) ──
