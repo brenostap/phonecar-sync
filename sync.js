@@ -242,11 +242,11 @@ function dateOrNull(v) {
 }
 
 // ── SALVAR CONTAS A RECEBER DE UMA VENDA ──────────────────────
-// contas[] = contas-a-receber da venda (vencimento + status pago/pendente).
-// Mapeamento DEFENSIVO: alem das colunas tipadas mais provaveis, guarda o
-// objeto cru em `raw` (jsonb). Se algum nome de campo da API for diferente,
-// nada se perde -> da pra re-mapear a partir do raw sem re-buscar na API.
-// Nao alimenta calculo nenhum ainda; e insumo pra futura aba Caixa.
+// contas[] = contas-a-receber da venda. Campos confirmados no payload real
+// (jul/2026): valor, valor_pago, valor_pendente, status (paid/canceled/...),
+// tipo (receber), data_vencimento, parent_id (== id da venda). Guardamos o
+// objeto cru em `raw` (jsonb) pra nao perder o resto (pagamentos aninhados,
+// plano_conta, cadastrador). Insumo pra futura aba Caixa; nao alimenta calculo.
 async function salvarContasVenda(vendaId, contas) {
   if (!contas || !contas.length) return;
   const vistos = new Set();
@@ -256,16 +256,12 @@ async function salvarContasVenda(vendaId, contas) {
     vistos.add(c.id);
     rows.push({
       id: c.id, venda_id: vendaId,
-      valor: numOrNull(c.valor),
-      vencimento: dateOrNull(c.vencimento ?? c.data_vencimento),
+      tipo: c.tipo ?? null,
       status: c.status ?? null,
-      pago: typeof c.pago === 'boolean' ? c.pago : null,
-      data_pagamento: (c.data_pagamento || c.pago_em) || null,
-      forma_pagamento: c.forma_pagamento?.nome
-        ?? (typeof c.forma_pagamento === 'string' ? c.forma_pagamento : null),
-      parcela: c.parcela != null ? parseInt(c.parcela)
-        : (c.numero_parcela != null ? parseInt(c.numero_parcela) : null),
-      descricao: c.descricao ?? c.observacao ?? null,
+      valor: numOrNull(c.valor),
+      valor_pago: numOrNull(c.valor_pago),
+      valor_pendente: numOrNull(c.valor_pendente),
+      vencimento: dateOrNull(c.data_vencimento ?? c.vencimento),
       raw: c,
       synced_at: new Date().toISOString()
     });
