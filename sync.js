@@ -389,6 +389,47 @@ async function resyncProdutos() {
   await logSync('resync_produtos', total, 'ok');
 }
 
+// ── BACKFILL PAGAMENTOS+CONTAS (sob demanda via BACKFILL_FROM/TO) ──
+// Preenche pagamentos e contas de vendas historicas que cairam fora da janela
+// de 7 dias do sync incremental. Range de datas inclusivo (YYYY-MM-DD). Pula
+// quem ja tem pagamento (idempotente/barato). Reusa salvar* -> zero logica nova.
+async function backfillDetalhes(from, to) {
+  console.log(` Backfill pagamentos+contas de ${from} a ${to}...`);
+  const { data: vendas, error } = await supabase
+    .from('vendas')
+    .select('id, data_saida')
+    .gte('data_saida', from)
+    .lte('data_saida', `${to} 23:59:59`)
+    .order('data_saida', { ascending: true });
+  if (error) throw error;
+  if (!vendas?.length) { console.log(' Nenhuma venda no range'); return; }
+
+  // Descobrir quem ja tem pagamento (em lotes p/ nao estourar a URL do PostgREST)
+  const cobertos = new Set();
+  for (let i = 0; i < vendas.length; i += 300) {
+    const lote = vendas.slice(i, i + 300).map(v => v.id);
+    const { data: jaTem } = await supabase.from('pagamentos').select('venda_id').in('venda_id', lote);
+    (jaTem || []).forEach(r => cobertos.add(r.venda_id));
+  }
+  const alvo = vendas.filter(v => !cobertos.has(v.id));
+  console.log(` ${vendas.length} vendas no range, ${alvo.length} sem pagamento -> backfill`);
+
+  let ok = 0, erro = 0;
+  for (const v of alvo) {
+    try {
+      const detail = await fnGet(`/vendas/${v.id}`);
+      const d = detail.data || detail;
+      await salvarPagamentosVenda(v.id, d.pagamentos || []);
+      await salvarContasVenda(v.id, d.contas || []);
+      ok++;
+      if (ok % 50 === 0) console.log(`  ...${ok}/${alvo.length}`);
+    } catch (e) { erro++; console.warn(` Erro venda ${v.id}:`, e.message); }
+    await sleep(300);
+  }
+  console.log(` [backfill] ${ok} vendas processadas, ${erro} erros`);
+  await logSync('backfill_pagamentos', ok, erro ? 'ok_com_erros' : 'ok');
+}
+
 // ── MAIN ──────────────────────────────────────────────────────
 async function main() {
   console.log('🚀 Phone Cart Sync v3.1 —', new Date().toLocaleString('pt-BR'));
@@ -398,7 +439,16 @@ async function main() {
     process.exit(1);
   }
   const RESYNC = process.env.RESYNC_PRODUTOS === 'true';
+  const BACKFILL_FROM = process.env.BACKFILL_FROM;
+  const BACKFILL_TO   = process.env.BACKFILL_TO;
   try {
+    // Modo backfill (manual): roda SO o backfill, pula o sync incremental
+    if (BACKFILL_FROM && BACKFILL_TO) {
+      console.log(`\n⏬ Modo backfill (${BACKFILL_FROM} → ${BACKFILL_TO}) — sync incremental pulado`);
+      await backfillDetalhes(BACKFILL_FROM, BACKFILL_TO);
+      console.log('\n✅ Backfill completo!');
+      return;
+    }
     console.log('\n👔 Funcionários...'); await syncFuncionarios();
     console.log('\n📱 Estoque...');     await syncEstoque();
     console.log('\n👥 Clientes...');    await syncClientes();
