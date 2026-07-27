@@ -235,15 +235,54 @@ function numOrNull(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+function dateOrNull(v) {
+  if (!v || typeof v !== 'string') return null;
+  const s = v.slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null;
+}
+
+// ── SALVAR CONTAS A RECEBER DE UMA VENDA ──────────────────────
+// contas[] = contas-a-receber da venda (vencimento + status pago/pendente).
+// Mapeamento DEFENSIVO: alem das colunas tipadas mais provaveis, guarda o
+// objeto cru em `raw` (jsonb). Se algum nome de campo da API for diferente,
+// nada se perde -> da pra re-mapear a partir do raw sem re-buscar na API.
+// Nao alimenta calculo nenhum ainda; e insumo pra futura aba Caixa.
+async function salvarContasVenda(vendaId, contas) {
+  if (!contas || !contas.length) return;
+  const vistos = new Set();
+  const rows = [];
+  for (const c of contas) {
+    if (!c || c.id == null || vistos.has(c.id)) continue;
+    vistos.add(c.id);
+    rows.push({
+      id: c.id, venda_id: vendaId,
+      valor: numOrNull(c.valor),
+      vencimento: dateOrNull(c.vencimento ?? c.data_vencimento),
+      status: c.status ?? null,
+      pago: typeof c.pago === 'boolean' ? c.pago : null,
+      data_pagamento: (c.data_pagamento || c.pago_em) || null,
+      forma_pagamento: c.forma_pagamento?.nome
+        ?? (typeof c.forma_pagamento === 'string' ? c.forma_pagamento : null),
+      parcela: c.parcela != null ? parseInt(c.parcela)
+        : (c.numero_parcela != null ? parseInt(c.numero_parcela) : null),
+      descricao: c.descricao ?? c.observacao ?? null,
+      raw: c,
+      synced_at: new Date().toISOString()
+    });
+  }
+  if (rows.length) await supabase.from('contas').upsert(rows);
+}
+
 // ── HELPER: upsert uma venda com seus produtos ────────────────
 async function upsertVenda(venda) {
-  let produtos = [], pagamentos = [], upgrade = null;
+  let produtos = [], pagamentos = [], upgrade = null, contas = [];
   try {
     const detail = (await fnGet(`/vendas/${venda.id}`));
     const d = detail.data || detail;
     produtos   = d.produtos   || [];
     pagamentos = d.pagamentos || [];
     upgrade    = d.upgrade    || null;
+    contas     = d.contas     || [];
   } catch (e) { console.warn(` Erro detalhe venda ${venda.id}:`, e.message); }
 
   const { loja, vendedor, atendente } = parseObs(venda.observacoes);
@@ -268,6 +307,7 @@ async function upsertVenda(venda) {
   });
   await salvarProdutosVenda(venda.id, produtos);
   await salvarPagamentosVenda(venda.id, pagamentos);
+  await salvarContasVenda(venda.id, contas);
 }
 
 // ── SYNC VENDAS (novas + re-sync 7 dias para capturar edições) ──
