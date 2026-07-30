@@ -174,6 +174,15 @@ async function syncCompras() {
         qtd_produtos: parseInt(compra.qtd_produtos || 0), status: compra.status,
         observacoes: compra.observacoes, synced_at: new Date().toISOString()
       });
+      // Itens da compra — só das novas (não re-busca detalhe das antigas toda hora)
+      if (!lastSync || new Date(compra.data_entrada) > new Date(lastSync)) {
+        try {
+          const det = await fnGet(`/compras/${compra.id}`);
+          const dd = det.payload?.data || det.data || det;
+          await salvarProdutosCompra(compra.id, dd.produtos || []);
+        } catch (e) { console.warn(` Erro detalhe compra ${compra.id}:`, e.message); }
+        await sleep(150);
+      }
       total++;
     }
     if (compras.length < 100) break;
@@ -198,6 +207,31 @@ async function salvarProdutosVenda(vendaId, produtos) {
     is_principal: isPrincipal(p), synced_at: new Date().toISOString()
   }));
   await supabase.from('venda_produtos').upsert(prods);
+}
+
+// ── SALVAR ITENS DE UMA COMPRA ────────────────────────────────
+// Espelha salvarProdutosVenda para o lado da entrada. O detalhe /compras/:id
+// traz produtos[] com titulo/serial/imei_1/valor_estoque/preco/quantidade.
+async function salvarProdutosCompra(compraId, produtos) {
+  if (!produtos || !produtos.length) return;
+  const vistos = new Set();
+  const rows = [];
+  for (const p of produtos) {
+    if (!p || p.id == null || vistos.has(p.id)) continue;
+    vistos.add(p.id);
+    rows.push({
+      id: p.id, compra_id: compraId,
+      apple_id: p.apple_id || null,
+      titulo: p.titulo || p.produto?.titulo || null,
+      serial: p.serial || p.apple?.serial || null,
+      imei_1: p.imei_1 || p.apple?.imei_1 || null,
+      valor_estoque: numOrNull(p.valor_estoque),
+      preco: numOrNull(p.preco),
+      quantidade: parseInt(p.quantidade || 1),
+      synced_at: new Date().toISOString()
+    });
+  }
+  if (rows.length) await supabase.from('compra_produtos').upsert(rows);
 }
 
 // ── SALVAR PAGAMENTOS DE UMA VENDA ────────────────────────────
@@ -269,6 +303,35 @@ async function salvarContasVenda(vendaId, contas) {
   if (rows.length) await supabase.from('contas').upsert(rows);
 }
 
+// ── SALVAR TROCAS (aparelhos de entrada do upgrade) ───────────
+// A venda traz upgrade.produtos[] = os aparelhos que o cliente entregou na
+// troca. Antes só guardávamos o total (upgrade_valor/qtd) e descartávamos o
+// resto. Guardamos cada aparelho + o objeto cru em raw (jsonb) p/ não perder
+// bateria/garantia/etc. Campos best-effort — validar pelo raw na 1ª rodada.
+async function salvarTrocasVenda(vendaId, produtos) {
+  if (!produtos || !produtos.length) return;
+  const vistos = new Set();
+  const rows = [];
+  for (const p of produtos) {
+    if (!p) continue;
+    const id = p.id ?? p.apple_id ?? p.produto_id;
+    if (id == null || vistos.has(id)) continue;
+    vistos.add(id);
+    rows.push({
+      id, venda_id: vendaId,
+      apple_id: p.apple_id ?? null,
+      produto_id: p.produto_id ?? null,
+      titulo: p.titulo || p.produto?.titulo || null,
+      serial: p.serial || p.apple?.serial || null,
+      imei_1: p.imei_1 || p.apple?.imei_1 || null,
+      valor: numOrNull(p.valor ?? p.valor_total ?? p.preco),
+      raw: p,
+      synced_at: new Date().toISOString()
+    });
+  }
+  if (rows.length) await supabase.from('venda_trocas').upsert(rows);
+}
+
 // ── HELPER: upsert uma venda com seus produtos ────────────────
 async function upsertVenda(venda) {
   let produtos = [], pagamentos = [], upgrade = null, contas = [];
@@ -304,6 +367,7 @@ async function upsertVenda(venda) {
   await salvarProdutosVenda(venda.id, produtos);
   await salvarPagamentosVenda(venda.id, pagamentos);
   await salvarContasVenda(venda.id, contas);
+  await salvarTrocasVenda(venda.id, (upgrade && Array.isArray(upgrade.produtos)) ? upgrade.produtos : []);
 }
 
 // ── SYNC VENDAS (novas + re-sync 7 dias para capturar edições) ──
@@ -430,6 +494,77 @@ async function backfillDetalhes(from, to) {
   await logSync('backfill_pagamentos', ok, erro ? 'ok_com_erros' : 'ok');
 }
 
+// ── BACKFILL TROCAS (sob demanda via BACKFILL_TROCAS=true) ────
+// Preenche venda_trocas das vendas históricas que têm upgrade mas ainda não
+// têm troca detalhada. Idempotente: pula quem já tem linha em venda_trocas.
+async function backfillTrocas() {
+  console.log(' Backfill trocas (upgrade.produtos) de vendas históricas...');
+  const { data: vendas, error } = await supabase
+    .from('vendas').select('id').gt('upgrade_qtd', 0)
+    .order('data_saida', { ascending: false });
+  if (error) throw error;
+  if (!vendas?.length) { console.log(' Nenhuma venda com upgrade'); return; }
+
+  const jaTem = new Set();
+  for (let i = 0; i < vendas.length; i += 300) {
+    const lote = vendas.slice(i, i + 300).map(v => v.id);
+    const { data: t } = await supabase.from('venda_trocas').select('venda_id').in('venda_id', lote);
+    (t || []).forEach(r => jaTem.add(r.venda_id));
+  }
+  const alvo = vendas.filter(v => !jaTem.has(v.id));
+  console.log(` ${vendas.length} vendas c/ upgrade, ${alvo.length} sem troca detalhada -> backfill`);
+
+  let ok = 0, erro = 0;
+  for (const v of alvo) {
+    try {
+      const detail = await fnGet(`/vendas/${v.id}`);
+      const up = (detail.data || detail).upgrade;
+      const prods = up && Array.isArray(up.produtos) ? up.produtos : [];
+      if (prods.length) { await salvarTrocasVenda(v.id, prods); ok++; }
+      if (ok % 50 === 0 && ok) console.log(`  ...${ok}/${alvo.length}`);
+    } catch (e) { erro++; console.warn(` Erro venda ${v.id}:`, e.message); }
+    await sleep(250);
+  }
+  console.log(` [backfill_trocas] ${ok} vendas com troca salva, ${erro} erros`);
+  await logSync('backfill_trocas', ok, erro ? 'ok_com_erros' : 'ok');
+}
+
+// ── BACKFILL ITENS DE COMPRA (via BACKFILL_COMPRAS=true) ──────
+// Preenche compra_produtos das compras que ainda não têm itens. Range opcional
+// por data (COMPRAS_FROM/TO, YYYY-MM-DD). Idempotente: pula quem já tem item.
+async function backfillCompraItens(from, to) {
+  console.log(` Backfill itens de compra${from ? ` de ${from} a ${to || 'hoje'}` : ' (todas)'}...`);
+  let q = supabase.from('compras').select('id, data_entrada').order('data_entrada', { ascending: true });
+  if (from) q = q.gte('data_entrada', from);
+  if (to)   q = q.lte('data_entrada', `${to} 23:59:59`);
+  const { data: compras, error } = await q;
+  if (error) throw error;
+  if (!compras?.length) { console.log(' Nenhuma compra no range'); return; }
+
+  const comItens = new Set();
+  for (let i = 0; i < compras.length; i += 300) {
+    const lote = compras.slice(i, i + 300).map(c => c.id);
+    const { data: jaTem } = await supabase.from('compra_produtos').select('compra_id').in('compra_id', lote);
+    (jaTem || []).forEach(r => comItens.add(r.compra_id));
+  }
+  const alvo = compras.filter(c => !comItens.has(c.id));
+  console.log(` ${compras.length} compras no range, ${alvo.length} sem itens -> backfill`);
+
+  let ok = 0, erro = 0;
+  for (const c of alvo) {
+    try {
+      const detail = await fnGet(`/compras/${c.id}`);
+      const dd = detail.payload?.data || detail.data || detail;
+      const produtos = dd.produtos || [];
+      if (produtos.length) { await salvarProdutosCompra(c.id, produtos); ok++; }
+      if (ok % 50 === 0 && ok) console.log(`  ...${ok}/${alvo.length}`);
+    } catch (e) { erro++; console.warn(` Erro compra ${c.id}:`, e.message); }
+    await sleep(250);
+  }
+  console.log(` [backfill_compras] ${ok} compras com itens salvos, ${erro} erros`);
+  await logSync('backfill_compras', ok, erro ? 'ok_com_erros' : 'ok');
+}
+
 // ── MAIN ──────────────────────────────────────────────────────
 async function main() {
   console.log('🚀 Phone Cart Sync v3.1 —', new Date().toLocaleString('pt-BR'));
@@ -441,12 +576,26 @@ async function main() {
   const RESYNC = process.env.RESYNC_PRODUTOS === 'true';
   const BACKFILL_FROM = process.env.BACKFILL_FROM;
   const BACKFILL_TO   = process.env.BACKFILL_TO;
+  const BACKFILL_TROCAS  = process.env.BACKFILL_TROCAS === 'true';
+  const BACKFILL_COMPRAS = process.env.BACKFILL_COMPRAS === 'true';
   try {
     // Modo backfill (manual): roda SO o backfill, pula o sync incremental
     if (BACKFILL_FROM && BACKFILL_TO) {
       console.log(`\n⏬ Modo backfill (${BACKFILL_FROM} → ${BACKFILL_TO}) — sync incremental pulado`);
       await backfillDetalhes(BACKFILL_FROM, BACKFILL_TO);
       console.log('\n✅ Backfill completo!');
+      return;
+    }
+    if (BACKFILL_TROCAS) {
+      console.log('\n⏬ Modo backfill de trocas — sync incremental pulado');
+      await backfillTrocas();
+      console.log('\n✅ Backfill de trocas completo!');
+      return;
+    }
+    if (BACKFILL_COMPRAS) {
+      console.log('\n⏬ Modo backfill de itens de compra — sync incremental pulado');
+      await backfillCompraItens(process.env.COMPRAS_FROM, process.env.COMPRAS_TO);
+      console.log('\n✅ Backfill de itens de compra completo!');
       return;
     }
     console.log('\n👔 Funcionários...'); await syncFuncionarios();
