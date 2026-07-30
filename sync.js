@@ -405,13 +405,18 @@ async function syncVendas() {
   seteDiasAtras.setDate(seteDiasAtras.getDate() - 7);
   const dataFiltro = seteDiasAtras.toISOString().slice(0, 10);
 
-  let pageR = 1, totalResync = 0;
-  while (true) {
+  let pageR = 1, totalResync = 0, fimResync = false;
+  while (!fimResync) {
     const data = await fnGet(`/vendas?sort=data_saida:desc&page=${pageR}&perPage=50&filters[data_saida_from]=${dataFiltro}`);
     const vendas = data.data || [];
     if (!vendas.length) break;
 
     for (const venda of vendas) {
+      // GUARD no cliente: a API às vezes ignora `data_saida_from` e devolve o
+      // histórico inteiro -> o loop varreria tudo e estouraria o timeout de 60min
+      // (moinho girando à toa). Como vem ordenado por data desc, ao cruzar a
+      // janela de 7 dias a gente PARA de vez. Sem isso, o sync nunca fecha.
+      if (new Date(venda.data_saida) < seteDiasAtras) { fimResync = true; break; }
       // Pular vendas que já foram processadas como novas neste run
       if (lastSync && new Date(venda.data_saida) > new Date(lastSync)) continue;
       await upsertVenda(venda);
