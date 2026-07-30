@@ -663,13 +663,15 @@ async function main() {
     console.log('\n📱 Estoque...');     await syncEstoque();
     console.log('\n👥 Clientes...');    await syncClientes();
     console.log('\n🛒 Compras...');     await syncCompras();
-    console.log('\n📦 Vendas...');      await syncVendas();
     // Auto-completa histórico (itens de compra + trocas) em lotes, até zerar.
-    // Não crítico: se falhar, não derruba o sync principal.
+    // Roda ANTES das vendas de propósito: a etapa de vendas é longa e pode
+    // consumir a rodada; assim o backfill sempre tem sua vez. Bounded (150 por
+    // rodada), idempotente e não crítico (try/catch não derruba o sync).
     try {
       console.log('\n🧩 Auto-backfill de itens de compra...'); await autoBackfillCompras();
       console.log('🧩 Auto-backfill de trocas...');           await autoBackfillTrocas();
     } catch (e) { console.warn(' Auto-backfill falhou (não crítico):', e.message); }
+    console.log('\n📦 Vendas...');      await syncVendas();
     if (RESYNC) { console.log('\n🔄 Resync produtos...'); await resyncProdutos(); }
     console.log('\n✅ Sync completo!');
   } catch (err) {
