@@ -565,6 +565,67 @@ async function backfillCompraItens(from, to) {
   await logSync('backfill_compras', ok, erro ? 'ok_com_erros' : 'ok');
 }
 
+// ── AUTO-BACKFILL (roda junto do cron, em lotes, até zerar) ───
+// Sem depender de flag manual nem de mexer no workflow: cada rodada preenche
+// até LIMITE itens de compra e LIMITE trocas que ainda faltam. Idempotente
+// (pula quem já tem) e barato quando não há pendência. Some sozinho ao zerar.
+const AUTO_BACKFILL_LIMITE = 150;
+
+async function autoBackfillCompras(limite = AUTO_BACKFILL_LIMITE) {
+  const desde = new Date(); desde.setDate(desde.getDate() - 180);
+  const { data: compras } = await supabase.from('compras')
+    .select('id').gte('data_entrada', desde.toISOString())
+    .order('data_entrada', { ascending: false });
+  if (!compras?.length) return;
+  const comItens = new Set();
+  for (let i = 0; i < compras.length; i += 300) {
+    const lote = compras.slice(i, i + 300).map(c => c.id);
+    const { data } = await supabase.from('compra_produtos').select('compra_id').in('compra_id', lote);
+    (data || []).forEach(r => comItens.add(r.compra_id));
+  }
+  const alvo = compras.filter(c => !comItens.has(c.id)).slice(0, limite);
+  if (!alvo.length) { console.log(' [auto-backfill compras] nada pendente'); return; }
+  console.log(` [auto-backfill compras] ${alvo.length} sem itens nesta rodada`);
+  let ok = 0;
+  for (const c of alvo) {
+    try {
+      const det = await fnGet(`/compras/${c.id}`);
+      const dd = det.payload?.data || det.data || det;
+      if ((dd.produtos || []).length) { await salvarProdutosCompra(c.id, dd.produtos); ok++; }
+    } catch (e) { console.warn(` Erro compra ${c.id}:`, e.message); }
+    await sleep(200);
+  }
+  console.log(` [auto-backfill compras] ${ok} preenchidas`);
+  await logSync('auto_backfill_compras', ok, 'ok');
+}
+
+async function autoBackfillTrocas(limite = AUTO_BACKFILL_LIMITE) {
+  const { data: vendas } = await supabase.from('vendas')
+    .select('id').gt('upgrade_qtd', 0).order('data_saida', { ascending: false });
+  if (!vendas?.length) return;
+  const jaTem = new Set();
+  for (let i = 0; i < vendas.length; i += 300) {
+    const lote = vendas.slice(i, i + 300).map(v => v.id);
+    const { data } = await supabase.from('venda_trocas').select('venda_id').in('venda_id', lote);
+    (data || []).forEach(r => jaTem.add(r.venda_id));
+  }
+  const alvo = vendas.filter(v => !jaTem.has(v.id)).slice(0, limite);
+  if (!alvo.length) { console.log(' [auto-backfill trocas] nada pendente'); return; }
+  console.log(` [auto-backfill trocas] ${alvo.length} sem troca nesta rodada`);
+  let ok = 0;
+  for (const v of alvo) {
+    try {
+      const det = await fnGet(`/vendas/${v.id}`);
+      const up = (det.data || det).upgrade;
+      const prods = up && Array.isArray(up.produtos) ? up.produtos : [];
+      if (prods.length) { await salvarTrocasVenda(v.id, prods); ok++; }
+    } catch (e) { console.warn(` Erro venda ${v.id}:`, e.message); }
+    await sleep(200);
+  }
+  console.log(` [auto-backfill trocas] ${ok} preenchidas`);
+  await logSync('auto_backfill_trocas', ok, 'ok');
+}
+
 // ── MAIN ──────────────────────────────────────────────────────
 async function main() {
   console.log('🚀 Phone Cart Sync v3.1 —', new Date().toLocaleString('pt-BR'));
@@ -603,6 +664,12 @@ async function main() {
     console.log('\n👥 Clientes...');    await syncClientes();
     console.log('\n🛒 Compras...');     await syncCompras();
     console.log('\n📦 Vendas...');      await syncVendas();
+    // Auto-completa histórico (itens de compra + trocas) em lotes, até zerar.
+    // Não crítico: se falhar, não derruba o sync principal.
+    try {
+      console.log('\n🧩 Auto-backfill de itens de compra...'); await autoBackfillCompras();
+      console.log('🧩 Auto-backfill de trocas...');           await autoBackfillTrocas();
+    } catch (e) { console.warn(' Auto-backfill falhou (não crítico):', e.message); }
     if (RESYNC) { console.log('\n🔄 Resync produtos...'); await resyncProdutos(); }
     console.log('\n✅ Sync completo!');
   } catch (err) {
