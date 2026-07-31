@@ -399,11 +399,33 @@ async function syncVendas() {
     await sleep(300);
   }
 
-  // PARTE 2: Re-sync dos últimos 7 dias (captura edições em vendas antigas)
-  console.log(' Re-sincronizando últimos 7 dias para capturar edições...');
-  const seteDiasAtras = new Date();
-  seteDiasAtras.setDate(seteDiasAtras.getDate() - 7);
-  const dataFiltro = seteDiasAtras.toISOString().slice(0, 10);
+  // PARTE 2: Re-sync da janela recente (captura edições em vendas antigas)
+  //
+  // A janela precisa ALCANCAR a data da venda editada -- senao a correcao feita no
+  // FoneNinja nunca volta pro Supabase e o painel segue mostrando o dado velho.
+  // Em 31/07/2026 isso escondeu 16 vendas de 03 a 20/07 (R$32 mil, sendo R$23 mil
+  // presos em "pending"): ja estavam corrigidas la e o painel nao sabia. Duas de
+  // 28 e 30/07, dentro da janela, entraram na hora -- o mecanismo funciona, so
+  // nao alcancava o mes inteiro. E fechamento e exatamente quando se corrige o
+  // mes inteiro, entao 7 dias fixos e a janela errada pra esse uso.
+  //
+  // Mas 45 dias SEMPRE tambem nao da: o job roda de hora em hora e isso estouraria
+  // a cota de minutos do Actions (~7min x 24 x 30 = 5000min, o plano free da 2000).
+  // Entao a janela abre so quando faz sentido:
+  //   - rodada das 05h UTC (1x/dia): toda correcao entra em ate 24h, custe ~7min/dia
+  //   - workflow_dispatch com resync_produtos=true: o "run fundo" manual, pra usar
+  //     no dia do fechamento quando nao da pra esperar
+  //   - DIAS_RESYNC explicito, se um dia virar input do workflow
+  const JANELA_PADRAO = 7, JANELA_LONGA = 45;
+  const runFundo = process.env.RESYNC_PRODUTOS === 'true' || new Date().getUTCHours() === 5;
+  const DIAS_RESYNC = process.env.DIAS_RESYNC
+    ? Math.max(1, parseInt(process.env.DIAS_RESYNC, 10) || JANELA_PADRAO)
+    : (runFundo ? JANELA_LONGA : JANELA_PADRAO);
+
+  console.log(` Re-sincronizando últimos ${DIAS_RESYNC} dias para capturar edições...`);
+  const janelaInicio = new Date();
+  janelaInicio.setDate(janelaInicio.getDate() - DIAS_RESYNC);
+  const dataFiltro = janelaInicio.toISOString().slice(0, 10);
 
   let pageR = 1, totalResync = 0, fimResync = false;
   while (!fimResync) {
@@ -415,8 +437,8 @@ async function syncVendas() {
       // GUARD no cliente: a API às vezes ignora `data_saida_from` e devolve o
       // histórico inteiro -> o loop varreria tudo e estouraria o timeout de 60min
       // (moinho girando à toa). Como vem ordenado por data desc, ao cruzar a
-      // janela de 7 dias a gente PARA de vez. Sem isso, o sync nunca fecha.
-      if (new Date(venda.data_saida) < seteDiasAtras) { fimResync = true; break; }
+      // janela configurada a gente PARA de vez. Sem isso, o sync nunca fecha.
+      if (new Date(venda.data_saida) < janelaInicio) { fimResync = true; break; }
       // Pular vendas que já foram processadas como novas neste run
       if (lastSync && new Date(venda.data_saida) > new Date(lastSync)) continue;
       await upsertVenda(venda);
