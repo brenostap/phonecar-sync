@@ -415,11 +415,17 @@ async function syncVendas() {
   //   - rodada das 05h UTC (1x/dia): toda correcao entra em ate 24h, custe ~7min/dia
   //   - workflow_dispatch com resync_produtos=true: o "run fundo" manual, pra usar
   //     no dia do fechamento quando nao da pra esperar
-  //   - DIAS_RESYNC explicito, se um dia virar input do workflow
-  const JANELA_PADRAO = 7, JANELA_LONGA = 45;
+  //   - workflow_dispatch com dias_resync=N: janela sob medida. Os 45 dias contam
+  //     de HOJE, entao fechar um mes ja passado nao cabe neles -- em set/2026 os
+  //     45 dias alcancam so meados de julho. Pra reconferir um mes antigo, manda
+  //     o numero de dias na mao (ex.: 120 pra alcancar abril).
+  const JANELA_PADRAO = 7, JANELA_LONGA = 45, JANELA_MAX = 400;
   const runFundo = process.env.RESYNC_PRODUTOS === 'true' || new Date().getUTCHours() === 5;
+  // Teto de 400 dias: a Parte 2 pagina ate achar venda mais velha que a janela,
+  // entao um numero absurdo varreria a base inteira e estouraria o timeout de 60min
+  // do Actions. 400 cobre um ano e ainda termina.
   const DIAS_RESYNC = process.env.DIAS_RESYNC
-    ? Math.max(1, parseInt(process.env.DIAS_RESYNC, 10) || JANELA_PADRAO)
+    ? Math.min(JANELA_MAX, Math.max(1, parseInt(process.env.DIAS_RESYNC, 10) || JANELA_PADRAO))
     : (runFundo ? JANELA_LONGA : JANELA_PADRAO);
 
   console.log(` Re-sincronizando últimos ${DIAS_RESYNC} dias para capturar edições...`);
