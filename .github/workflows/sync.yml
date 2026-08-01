@@ -14,6 +14,10 @@ on:
         description: 'Ressincronizar produtos/acessórios de vendas antigas? (true/false)'
         required: false
         default: 'false'
+      dias_resync:
+        description: 'Janela de re-sync em dias (vazio = 7 na rodada normal, 45 no run fundo). Ex.: 120 para reconferir um mês antigo. Máx. 400.'
+        required: false
+        default: ''
 
 jobs:
   sync:
@@ -40,6 +44,7 @@ jobs:
           SUPABASE_URL:     ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY:     ${{ secrets.SUPABASE_KEY }}
           RESYNC_PRODUTOS:  ${{ github.event.inputs.resync_produtos || 'false' }}
+          DIAS_RESYNC:      ${{ github.event.inputs.dias_resync || '' }}
         run: node sync.js
 
       - name: Notify on failure
