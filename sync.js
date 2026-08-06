@@ -132,6 +132,30 @@ async function syncEstoque() {
   await logSync('estoque', rows.length, 'ok');
 }
 
+// ── SYNC ORIGENS DE CLIENTE ───────────────────────────────────
+// Desde ago/2026 a ORIGEM do cliente é como o time marca a loja (CART/URBAN).
+// O catálogo é pequeno (9 linhas) e quase nunca muda, mas sem ele o `origem_id`
+// é um número sem significado. `loja` é derivada do nome — origem com nome fora
+// do padrão fica com loja null e pode ser corrigida à mão no Supabase (o upsert
+// abaixo sobrescreve: se editar à mão, ajuste também a regra aqui).
+function origemParaLoja(nome) {
+  const n = String(nome || '').toUpperCase();
+  if (n.includes('CART')) return 'cart';
+  if (n.includes('URBAN')) return 'urban';
+  return null;
+}
+async function syncOrigens() {
+  const data = await fnGet('/origem_clientes');
+  const origens = data.payload?.data || data.data || [];
+  if (!origens.length) { console.log(' [origens] nada retornado'); return; }
+  const rows = origens.map(o => ({
+    id: o.id, nome: o.nome, ativo: !!o.ativo,
+    loja: origemParaLoja(o.nome), synced_at: new Date().toISOString()
+  }));
+  await supabase.from('origens_cliente').upsert(rows);
+  await logSync('origens_cliente', rows.length, 'ok');
+}
+
 // ── SYNC CLIENTES ─────────────────────────────────────────────
 async function syncClientes() {
   let page = 1, total = 0;
@@ -361,6 +385,19 @@ async function upsertVenda(venda) {
     observacoes: venda.observacoes,
     vendedor_obs: vendedor, atendente_obs: atendente,
     vendedor_id: venda.vendedor_id,
+    // Virada de ago/2026 (docs/REGISTRO-VENDA-2026-08.md no repo do painel): o que
+    // só existia na obs vem estruturado no payload da venda. Gravamos os três
+    // CRUS, ao lado da obs -- quem decide qual vale é o painel, não o sync.
+    //   origem_cliente_id -> loja. Vem na VENDA, não só no cliente: já nasce
+    //     congelada, então editar o cadastro do cliente não muda venda antiga.
+    //   cadastrador_id    -> quem estava logado ao lançar (= atendente). Antes só
+    //     dava pra garimpar em `contas.raw->cadastrador`.
+    //   vendedor_nome     -> nome do perfil do campo vendedor, direto do payload.
+    //     Não depende de `funcionarios`: os perfis dos vendedores online (Mel, Isa,
+    //     David) NÃO aparecem em /refactored-funcionarios, só aqui.
+    origem_cliente_id: venda.origem_cliente_id ?? null,
+    cadastrador_id: venda.cadastrador_id ?? null,
+    vendedor_nome: venda.vendedor?.nome || null,
     qtd_produtos: parseInt(venda.qtd_produtos || 0),
     synced_at: new Date().toISOString()
   });
@@ -687,6 +724,7 @@ async function main() {
       return;
     }
     console.log('\n👔 Funcionários...'); await syncFuncionarios();
+    console.log('\n🏷️  Origens...');     await syncOrigens();
     console.log('\n📱 Estoque...');     await syncEstoque();
     console.log('\n👥 Clientes...');    await syncClientes();
     console.log('\n🛒 Compras...');     await syncCompras();
