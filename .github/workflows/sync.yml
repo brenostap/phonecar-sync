@@ -1,6 +1,6 @@
 # ══════════════════════════════════════════════════════════════
 # PHONE CART — Sync automático via GitHub Actions
-# Roda a cada hora, 24h por dia, de graça
+# Cron de hora em hora, mas o GitHub entrega a cada 2-5h -- ele atrasa e pula agendamento
 # ══════════════════════════════════════════════════════════════
 
 name: Sync FoneNinja → Supabase
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       resync_produtos:
-        description: 'Ressincronizar produtos/acessórios de vendas antigas? (true/false)'
+        description: 'RUN FUNDO: abre a janela longa (~45 dias) das VENDAS e dos produtos. Use no dia do fechamento -- a rodada normal so rele 7 dias. (true/false)'
         required: false
         default: 'false'
 
