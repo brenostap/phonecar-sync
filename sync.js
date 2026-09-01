@@ -24,6 +24,12 @@ function isAcessorio(p) {
 }
 function isPrincipal(p) { return !isAcessorio(p); }
 
+// Nome de LOJA no campo de gente nao e gente. Espelho de NOME_E_LOJA em
+// js/equipe.js: "Vendedor: cart" quer dizer venda da casa, nao um vendedor
+// chamado Cart. Sem isto o campo vendedor_obs sai com 'cart'/'urban' e diverge
+// do que o painel le -- eram 33 vendas entre jun e set/2026.
+const NOME_E_LOJA = ['cart', 'urban', 'loja', 'online'];
+
 function parseObs(obs) {
   if (!obs) return {};
   let raw = obs.toLowerCase().trim();
@@ -33,7 +39,8 @@ function parseObs(obs) {
   raw.split('\n').forEach(seg => {
     seg = seg.trim();
     if (!seg) return;
-    seg.split(/[,.]+\s*(?=(?:loja|vend|atend))/).forEach(s => { s = s.trim(); if (s) lines.push(s); });
+    // mesmo split do painel: separa tambem por espaco antes da palavra-chave
+    seg.split(/(?:[,.]+\s*|\s+)(?=(?:loja|vend|atend))/).forEach(s => { s = s.trim(); if (s) lines.push(s); });
   });
   let loja = null, vendedor = null, atendente = null;
   lines.forEach(l => {
@@ -47,20 +54,35 @@ function parseObs(obs) {
       if (l.includes('urban')) loja = 'urban';
       else if (l.includes('cart')) loja = 'cart';
     }
+    // ⚠️ ESTES DOIS REGEX SAO ESPELHO DE parseObs() EM js/equipe.js DO REPO
+    // gestaocart. Nao os "simplifique" aqui sem mexer la: o painel e quem PAGA a
+    // comissao, e ele le a mesma observacao.
+    //
+    // Ate 01/set/2026 este lado aceitava so `-` e `:` como separador e nao
+    // entendia as formas verbais. Resultado: "Atendente. Anne" (ponto),
+    // "atendendo - mel" e "atendente. - vitinho" vinham NULL daqui, enquanto o
+    // painel resolvia normalmente. Eram 16 vendas so em ago/2026 -- e como as
+    // views do "Meu dia" filtram por vendas.atendente_key, que nasce DESTE
+    // campo, o colaborador abria a tela e via menos acessorio do que recebeu:
+    // Leo -R$400, Anne -R$400, Mel -R$350, Gabi -R$120, Vitinho -R$50.
+    //
+    // Separadores agora: espaco, hifen, dois-pontos, ponto e virgula (a mesma
+    // classe [\s\-:.,] do painel). Formas verbais: vendeu/vendi/vendendo,
+    // atendeu/atendi/atendendo.
     if (isVend && !isAtend) {
-      const mv = l.match(/vend(?:edor[ao]?|a)?\s*[-:]+\s*(.+)/) || l.match(/vend(?:edor[ao]?|a)\s+(.+)/);
+      const mv = l.match(/vend(?:edor[ao]?|endo|eu|i\w*|e|a)?[\s\-:.,]+(.+)/);
       if (mv) {
         const tokens = mv[1].trim().split(/[\s,]+/);
         const nome = tokens.map(t => t.replace(/[-:,.]/g, '').trim()).find(t => t.length > 1);
-        if (nome) vendedor = nome;
+        if (nome && !NOME_E_LOJA.includes(nome)) vendedor = nome;
       }
     }
     if (isAtend) {
-      const ma = l.match(/atend(?:ente[s]?)?\s*[-:]+\s*(.+)/) || l.match(/atend(?:ente[s]?)\s+(.+)/);
+      const ma = l.match(/atend(?:ente[s]?|eu|i\w*|endo)?[\s\-:.,]+(.+)/);
       if (ma) {
         const tokens = ma[1].trim().split(/[\s,]+/);
         const nome = tokens.map(t => t.replace(/[-:,.]/g, '').trim()).find(t => t.length > 1);
-        if (nome) atendente = nome;
+        if (nome && !NOME_E_LOJA.includes(nome)) atendente = nome;
       }
     }
   });
